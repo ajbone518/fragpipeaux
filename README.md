@@ -37,6 +37,12 @@ npm run build      # static site in dist/ — host anywhere (GitHub Pages, S3, a
 npm test           # statistics + pipeline tests
 ```
 
+### Deploying to GitHub Pages
+
+`.github/workflows/deploy.yml` tests, builds and publishes `dist/` on every push to `main` (or on demand from the Actions tab).
+
+To set it up once, open **Settings → Pages** and set **Source** to **GitHub Actions**. The site is then served at `https://<owner>.github.io/fragpipeaux/`. Asset paths are relative, so the build works under that sub-path without extra configuration.
+
 Click **Try with demo data** for a synthetic three-condition experiment with a planted interferon response (Treated) and a cell-cycle loss (Knockout).
 
 ## Statistics notes
