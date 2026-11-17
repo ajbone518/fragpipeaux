@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { applyAnnotationTable, buildDataset, inferAnnotation, parseTable } from "./parse";
-import { defaultContrasts, defaultParams, differential, hclust, jacobiEigen, normalize, pca, process } from "./pipeline";
+import { defaultContrasts, defaultParams, differential, hclust, impute, jacobiEigen, normalize, pca, process, rng } from "./pipeline";
 import { demoFiles } from "./demo";
 import { finiteSorted, median } from "./stats";
 
@@ -102,6 +102,32 @@ describe("pipeline", () => {
     expect(res.explained[0]).toBeGreaterThan(res.explained[1]);
     const sum = res.explained.reduce((a, b) => a + b, 0);
     expect(sum).toBeLessThanOrEqual(1 + 1e-9);
+  });
+
+  it("kNN imputation restores values close to the truth for MAR dropouts", () => {
+    const R = rng(5);
+    const nP = 400, nS = 6;
+    const truth = Array.from({ length: nS }, () => new Float64Array(nP));
+    for (let r = 0; r < nP; r++) {
+      const base = 20 + 6 * R.next();
+      for (let j = 0; j < nS; j++) truth[j][r] = base + 0.1 * R.normal();
+    }
+    const m = truth.map((c) => Float64Array.from(c));
+    const holes: [number, number][] = [];
+    for (let r = 0; r < nP; r += 7) { m[r % nS][r] = NaN; holes.push([r % nS, r]); }
+    const { imputed, mask } = impute(m, [0, 0, 0, 1, 1, 1], { imputation: "knn", shift: 1.8, width: 0.3, seed: 1 });
+    for (const [j, r] of holes) {
+      expect(mask[j][r]).toBe(1);
+      expect(Math.abs(imputed[j][r] - truth[j][r])).toBeLessThan(0.6);
+    }
+  });
+
+  it("Perseus imputation is reproducible for a fixed seed and lands below observed values", () => {
+    const m = [Float64Array.of(20, 22, NaN, 25, 24, NaN), Float64Array.of(21, NaN, 23, 25, 24, 26)];
+    const a = impute(m, [0, 1], { imputation: "perseus", shift: 1.8, width: 0.3, seed: 9 });
+    const b = impute(m, [0, 1], { imputation: "perseus", shift: 1.8, width: 0.3, seed: 9 });
+    expect(Array.from(a.imputed[0])).toEqual(Array.from(b.imputed[0]));
+    expect(a.imputed[0][2]).toBeLessThan(22);
   });
 
   it("jacobiEigen diagonalises a symmetric matrix", () => {

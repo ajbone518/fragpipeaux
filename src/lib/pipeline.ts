@@ -237,23 +237,40 @@ function knnImpute(m: Matrix, out: Matrix, mask: Uint8Array[], groupOf: number[]
     if (ok) complete.push(r);
   }
   // Limit the candidate pool to keep this interactive on large tables.
-  const pool = complete.length > 3000 ? complete.filter((_, i) => i % Math.ceil(complete.length / 3000) === 0) : complete;
+  const maxPool = 1000;
+  const stride = Math.ceil(complete.length / maxPool);
+  const pool = stride > 1 ? complete.filter((_, i) => i % stride === 0) : complete;
   const q01 = m.map((c) => quantile(finiteSorted(c), 0.01));
+  const bestD = new Float64Array(k);
+  const bestQ = new Int32Array(k);
   for (let r = 0; r < nP; r++) {
     const missing: number[] = [];
     for (let j = 0; j < nS; j++) if (!Number.isFinite(m[j][r])) missing.push(j);
     if (!missing.length) continue;
-    const obs = [];
+    const obs: number[] = [];
     for (let j = 0; j < nS; j++) if (Number.isFinite(m[j][r])) obs.push(j);
     let nn: number[] = [];
     if (obs.length >= 2 && pool.length >= k) {
-      const d = pool.map((q) => {
+      // keep the k smallest distances with an insertion buffer (no full sort)
+      bestD.fill(Infinity);
+      for (const q of pool) {
         let s = 0;
-        for (const j of obs) s += (m[j][r] - m[j][q]) ** 2;
-        return [s / obs.length, q] as const;
-      });
-      d.sort((a, b) => a[0] - b[0]);
-      nn = d.slice(0, k).map((x) => x[1]);
+        for (const j of obs) {
+          const d = m[j][r] - m[j][q];
+          s += d * d;
+          if (s >= bestD[k - 1]) break;
+        }
+        if (s >= bestD[k - 1]) continue;
+        let pos = k - 1;
+        while (pos > 0 && bestD[pos - 1] > s) {
+          bestD[pos] = bestD[pos - 1];
+          bestQ[pos] = bestQ[pos - 1];
+          pos--;
+        }
+        bestD[pos] = s;
+        bestQ[pos] = q;
+      }
+      nn = Array.from(bestQ);
     }
     for (const j of missing) {
       let v: number;
@@ -375,7 +392,7 @@ export function defaultContrasts(conditions: string[], mode: "control" | "pairwi
 export function jacobiEigen(A: number[][]) {
   const n = A.length;
   const a = A.map((r) => r.slice());
-  const v = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => (i === j ? 1 : 0)));
+  const v: number[][] = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => (i === j ? 1 : 0)));
   for (let sweep = 0; sweep < 100; sweep++) {
     let off = 0;
     for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) off += a[i][j] ** 2;
@@ -496,7 +513,10 @@ export function hclust(dist: number[][]): { order: number[]; tree: Tree } {
   }
   const tree = nodes[[...active][0]]!;
   const order: number[] = [];
-  const walk = (t: Tree) => (t.leaf !== undefined ? order.push(t.leaf) : (walk(t.left!), walk(t.right!)));
+  const walk = (t: Tree): void => {
+    if (t.leaf !== undefined) order.push(t.leaf);
+    else { walk(t.left!); walk(t.right!); }
+  };
   walk(tree);
   return { order, tree };
 }
