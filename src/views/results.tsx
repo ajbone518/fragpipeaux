@@ -3,7 +3,20 @@ import type { Analysis } from "../state";
 import {
   ChartCard, Legend, TipRow, divergingRamp, download, fmt, fmtP, sequentialRamp, useThemeVersion,
 } from "../charts/core";
-import { BarChart, BoxPlot, DensityChart, DotPlot, GradientLegend, Heatmap, MissingMap, Scatter, Volcano, type VolcanoPoint } from "../charts/charts";
+import { BarChart, BoxPlot, DensityChart, DotPlot, GradientLegend, Heatmap, MissingMap, Scatter, Volcano, volcanoColors, volcanoDefaultPointSize, type VolcanoPoint } from "../charts/charts";
+import { useChartOptions, type OptionField } from "../charts/options";
+
+// Which parameters each kind of chart lets you edit.
+const F: Record<string, OptionField[]> = {
+  bar: ["title", "xLabel", "yLabel", "yRange", "size", "fontSize", "grid", "conditionColors"],
+  scree: ["title", "xLabel", "yLabel", "yRange", "size", "fontSize", "grid"],
+  box: ["title", "xLabel", "yLabel", "yRange", "size", "fontSize", "grid", "conditionColors"],
+  density: ["title", "xLabel", "yLabel", "xRange", "yRange", "size", "fontSize", "grid"],
+  matrix: ["title", "size", "fontSize", "conditionColors"],
+  pca: ["title", "xLabel", "yLabel", "xRange", "yRange", "size", "fontSize", "pointSize", "grid", "conditionColors"],
+  volcano: ["title", "xLabel", "yLabel", "xRange", "yRange", "size", "fontSize", "pointSize", "grid", "volcanoColors"],
+  heatmap: ["title", "size", "fontSize", "colorLimit", "rowLabels", "conditionColors"],
+};
 import { correlation, cvByCondition, euclidean, hclust, pca } from "../lib/pipeline";
 import { finiteSorted, median } from "../lib/stats";
 import { DataTable, Icon, Seg, type Column } from "../components/ui";
@@ -83,6 +96,13 @@ export function QCView({ a }: { a: Analysis }) {
   }, [a.results, nP]);
 
   const seqRamp = sequentialRamp(dark);
+  const oIds = useChartOptions("proteins_per_sample");
+  const oDist = useChartOptions("intensity_distributions");
+  const oCov = useChartOptions("protein_coverage");
+  const oCorr = useChartOptions("sample_correlation");
+  const oCv = useChartOptions("cv");
+  const oMiss = useChartOptions("missing_values");
+  const oImp = useChartOptions("imputation");
   const condLegend = a.conditions.map((c) => ({ label: c, color: a.condColor(c) }));
 
   return (
@@ -101,8 +121,10 @@ export function QCView({ a }: { a: Analysis }) {
       </div>
 
       <div className="grid grid-2">
-        <ChartCard title="Proteins per sample" sub="Quantified proteins before missing-value filtering" exportName="proteins_per_sample" className="span-all">
+        <ChartCard title="Proteins per sample" sub="Quantified proteins before missing-value filtering" exportName="proteins_per_sample" className="span-all"
+          customize={{ id: "proteins_per_sample", fields: F.bar, defaults: { yLabel: "Proteins", height: 260 } }}>
           <BarChart
+            opts={oIds}
             yTitle="Proteins"
             bars={proc.samples.map((s, i) => ({
               label: s.label, value: ids[i], color: a.condColor(s.condition),
@@ -116,20 +138,26 @@ export function QCView({ a }: { a: Analysis }) {
           title="Intensity distributions"
           sub={dist === "raw" ? "log₂ intensities before normalisation" : `After ${a.params.normalization} normalisation`}
           exportName="intensity_distributions"
+          customize={{ id: "intensity_distributions", fields: F.box, defaults: { yLabel: "log₂ intensity", height: 280 } }}
           actions={<Seg value={dist} onChange={setDist} options={[{ value: "raw", label: "Before" }, { value: "norm", label: "After" }]} />}
         >
-          <BoxPlot yTitle="log₂ intensity" series={(dist === "raw" ? proc.log2Raw : proc.normalized).map((c, j) => ({ label: labels[j], color: colors[j], values: finiteSorted(c) }))} />
+          <BoxPlot opts={oDist} yTitle="log₂ intensity" series={(dist === "raw" ? proc.log2Raw : proc.normalized).map((c, j) => ({ label: labels[j], color: colors[j], values: finiteSorted(c) }))} />
         </ChartCard>
 
-        <ChartCard title="Protein coverage" sub="Number of samples in which each protein is quantified" exportName="protein_coverage">
+        <ChartCard title="Protein coverage" sub="Number of samples in which each protein is quantified" exportName="protein_coverage"
+          customize={{ id: "protein_coverage", fields: F.scree, defaults: { yLabel: "Proteins", xLabel: "Samples quantified", height: 260 } }}>
           <BarChart
+            opts={oCov}
+            xTitle="Samples quantified"
             yTitle="Proteins"
             bars={coverage.slice(1).map((n, i) => ({ label: String(i + 1), value: n, color: "var(--series-1)", tip: <><div className="tt-title">Quantified in {i + 1} sample{i ? "s" : ""}</div><TipRow k="Proteins" v={n.toLocaleString()} /></> }))}
           />
         </ChartCard>
 
-        <ChartCard title="Sample correlation" sub="Pearson correlation of log₂ intensities, clustered" exportName="sample_correlation">
+        <ChartCard title="Sample correlation" sub="Pearson correlation of log₂ intensities, clustered" exportName="sample_correlation"
+          customize={{ id: "sample_correlation", fields: F.matrix }}>
           <Heatmap
+            opts={oCorr}
             values={corr.c} rowLabels={labels} colLabels={labels} colColors={colors}
             rowOrder={corr.order} colOrder={corr.order} colTree={corr.tree} square
             color={(v) => seqRamp((v - corr.lo) / (1 - corr.lo))}
@@ -138,18 +166,21 @@ export function QCView({ a }: { a: Analysis }) {
           />
         </ChartCard>
 
-        <ChartCard title="Coefficient of variation" sub="Per condition, on linear intensities; lower is more reproducible" exportName="cv">
-          <BoxPlot yTitle="CV (%)" series={cvs.map((c) => ({ label: c.condition, color: a.condColor(c.condition), values: finiteSorted(c.cvs) }))} />
+        <ChartCard title="Coefficient of variation" sub="Per condition, on linear intensities; lower is more reproducible" exportName="cv"
+          customize={{ id: "cv", fields: F.box, defaults: { yLabel: "CV (%)", height: 280 } }}>
+          <BoxPlot opts={oCv} yTitle="CV (%)" series={cvs.map((c) => ({ label: c.condition, color: a.condColor(c.condition), values: finiteSorted(c.cvs) }))} />
           <div className="small muted">Median CV: {cvs.map((c) => `${c.condition} ${c.cvs.length ? median(c.cvs).toFixed(1) : "–"}%`).join(" · ")}</div>
         </ChartCard>
 
-        <ChartCard title="Missing-value pattern" sub={`${present.n.toLocaleString()} proteins with ≥1 missing value (blue = quantified)`} exportName="missing_values">
-          {present.n ? <MissingMap present={present.cols} colLabels={labels} colColors={colors} /> : <div className="empty">No missing values 🎉</div>}
+        <ChartCard title="Missing-value pattern" sub={`${present.n.toLocaleString()} proteins with ≥1 missing value (blue = quantified)`} exportName="missing_values"
+          customize={{ id: "missing_values", fields: F.matrix, defaults: { height: 300 } }}>
+          {present.n ? <MissingMap opts={oMiss} present={present.cols} colLabels={labels} colColors={colors} /> : <div className="empty">No missing values 🎉</div>}
         </ChartCard>
 
         {a.params.imputation !== "none" && imputedVals.imp.length > 0 && (
-          <ChartCard title="Imputation" sub="Distribution of observed vs imputed values" exportName="imputation">
-            <DensityChart xTitle="log₂ intensity" series={[{ label: "Observed", color: "var(--series-1)", values: imputedVals.obs }, { label: "Imputed", color: "var(--imputed)", values: imputedVals.imp, dashed: true }]} />
+          <ChartCard title="Imputation" sub="Distribution of observed vs imputed values" exportName="imputation"
+            customize={{ id: "imputation", fields: F.density, defaults: { xLabel: "log₂ intensity", yLabel: "Density", height: 260 } }}>
+            <DensityChart opts={oImp} xTitle="log₂ intensity" series={[{ label: "Observed", color: "var(--series-1)", values: imputedVals.obs }, { label: "Imputed", color: "var(--imputed)", values: imputedVals.imp, dashed: true }]} />
             <Legend items={[{ label: `Observed (${imputedVals.obs.length.toLocaleString()})`, color: "var(--series-1)" }, { label: `Imputed (${imputedVals.imp.length.toLocaleString()})`, color: "var(--imputed)" }]} />
           </ChartCard>
         )}
@@ -167,6 +198,8 @@ export function PCAView({ a }: { a: Analysis }) {
   const [pcy, setPcy] = useState(1);
   const [labels, setLabels] = useState(true);
   const res = useMemo(() => pca(proc.imputed, Number(top)), [proc, top]);
+  const oPca = useChartOptions("pca");
+  const oScree = useChartOptions("pca_scree");
   const nPC = res.scores.length;
   if (nPC < 2) return <div className="empty">PCA needs at least three samples with complete data.</div>;
   const x = Math.min(pcx, nPC - 1), y = Math.min(pcy, nPC - 1);
@@ -183,6 +216,7 @@ export function PCAView({ a }: { a: Analysis }) {
         <ChartCard
           title={`PC${x + 1} vs PC${y + 1}`}
           exportName={`pca_PC${x + 1}_PC${y + 1}`}
+          customize={{ id: "pca", fields: F.pca, defaults: { xLabel: `PC${x + 1} (${pct(x)})`, yLabel: `PC${y + 1} (${pct(y)})`, height: 420, pointSize: 6 } }}
           actions={
             <div className="row">
               <select className="select sm" style={{ width: "auto" }} value={x} onChange={(e) => setPcx(+e.target.value)} aria-label="X axis component">{res.scores.map((_, i) => <option key={i} value={i}>PC{i + 1}</option>)}</select>
@@ -192,6 +226,7 @@ export function PCAView({ a }: { a: Analysis }) {
           }
         >
           <Scatter
+            opts={oPca}
             xTitle={`PC${x + 1} (${pct(x)})`} yTitle={`PC${y + 1} (${pct(y)})`} showLabels={labels}
             points={proc.samples.map((s, j) => ({
               x: res.scores[x][j], y: res.scores[y][j], label: s.label,
@@ -205,8 +240,8 @@ export function PCAView({ a }: { a: Analysis }) {
           <ChartCard title="Features" sub="Proteins used for PCA">
             <Seg value={top} onChange={setTop} options={[{ value: "500", label: "Top 500 variable" }, { value: "1000", label: "Top 1000" }, { value: "0", label: "All" }]} />
           </ChartCard>
-          <ChartCard title="Variance explained" exportName="pca_scree">
-            <BarChart height={220} yTitle="% variance" bars={res.explained.map((v, i) => ({ label: `PC${i + 1}`, value: +(100 * v).toFixed(2), color: i === x || i === y ? "var(--series-1)" : "var(--ns)" }))} />
+          <ChartCard title="Variance explained" exportName="pca_scree" customize={{ id: "pca_scree", fields: F.scree, defaults: { yLabel: "% variance", height: 220 } }}>
+            <BarChart opts={oScree} height={220} yTitle="% variance" bars={res.explained.map((v, i) => ({ label: `PC${i + 1}`, value: +(100 * v).toFixed(2), color: i === x || i === y ? "var(--series-1)" : "var(--ns)" }))} />
           </ChartCard>
         </div>
       </div>
@@ -255,6 +290,8 @@ export function DEView({ a }: { a: Analysis }) {
   const [onlySig, setOnlySig] = useState(false);
   const [nLabels, setNLabels] = useState(10);
   const res = a.results[Math.min(ci, a.results.length - 1)];
+  const oVol = useChartOptions("volcano");
+  const vcol = volcanoColors(oVol);
 
   const rows = useMemo<DERow[]>(() => {
     if (!res) return [];
@@ -327,6 +364,7 @@ export function DEView({ a }: { a: Analysis }) {
           title={`${res.a} vs ${res.b}`}
           sub={<>{res.nUp} up · {res.nDown} down · {a.params.test === "limma" && Number.isFinite(res.prior.df2) ? `prior df ${res.prior.df2.toFixed(1)}` : ""}</>}
           exportName={`volcano_${res.a}_vs_${res.b}`}
+          customize={{ id: "volcano", fields: F.volcano, defaults: { xLabel: "log₂ fold change", yLabel: "−log₁₀ p", height: 460, pointSize: volcanoDefaultPointSize(points.length) } }}
           actions={
             <label className="small muted row" style={{ gap: 6 }}>
               Labels
@@ -337,12 +375,13 @@ export function DEView({ a }: { a: Analysis }) {
           }
         >
           <Volcano
+            opts={oVol}
             points={points} lfc={a.params.lfc} pLine={pLine} highlight={matches}
             selected={selectedPos >= 0 ? selectedPos : null}
             onSelect={(i) => a.setSelected(proc.rows[i])}
             nLabels={nLabels} yTitle="−log₁₀ p"
           />
-          <Legend items={[{ label: `Up in ${res.a}`, color: "var(--up)" }, { label: `Up in ${res.b}`, color: "var(--down)" }, { label: "Not significant", color: "var(--ns)" }]} />
+          <Legend items={[{ label: `Up in ${res.a}`, color: vcol.up }, { label: `Up in ${res.b}`, color: vcol.down }, { label: "Not significant", color: vcol.ns }]} />
         </ChartCard>
 
         <section className="card">
@@ -386,6 +425,7 @@ export function HeatmapView({ a }: { a: Analysis }) {
   const [source, setSource] = useState<string>("any");
   const [maxRows, setMaxRows] = useState(100);
   const [clusterCols, setClusterCols] = useState(true);
+  const oHeat = useChartOptions("heatmap");
 
   const data = useMemo(() => {
     const nP = proc.rows.length;
@@ -423,7 +463,7 @@ export function HeatmapView({ a }: { a: Analysis }) {
   }, [proc, a.results, source, maxRows, clusterCols]);
 
   const div = divergingRamp(dark);
-  const lim = 2.5;
+  const lim = oHeat.colorLimit ?? 2.5;
   const color = (v: number) => div((Math.max(-lim, Math.min(lim, v)) + lim) / (2 * lim));
   const labels = proc.samples.map((s) => s.label);
 
@@ -453,11 +493,12 @@ export function HeatmapView({ a }: { a: Analysis }) {
           <span className="muted small">{data.total.toLocaleString()} candidates{data.total > maxRows ? `, showing ${maxRows} with the lowest p` : ""}</span>
         </div>
       </section>
-      <ChartCard title="Clustered heatmap" exportName="heatmap">
+      <ChartCard title="Clustered heatmap" exportName="heatmap" customize={{ id: "heatmap", fields: F.heatmap, defaults: { colorLimit: 2.5 } }}>
         {data.rows.length < 2 ? (
           <div className="empty">Not enough proteins. Try “Most variable” or relax the significance cutoffs.</div>
         ) : (
           <Heatmap
+            opts={oHeat}
             values={data.z}
             rowLabels={data.rows.map((i) => firstGene(ds.genes[proc.rows[i]]))}
             colLabels={labels}

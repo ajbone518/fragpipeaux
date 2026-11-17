@@ -22,6 +22,9 @@ export interface Analysis {
   conditions: string[];
   condColor: (c: string) => string;
   condShape: (c: string) => number;
+  /** user-chosen condition colours (hex), overriding the default palette */
+  colorOverrides: Record<string, string>;
+  setConditionColor: (c: string, color: string | null) => void;
   selected: number | null; // dataset protein index
   setSelected: (i: number | null) => void;
   /** Load a protein table, optionally with an annotation table; returns a status message. */
@@ -43,6 +46,18 @@ export function useAnalysis(): Analysis {
   const [control, setControl] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
+  const [colorOverrides, setColorOverrides] = useState<Record<string, string>>(() => {
+    try { return JSON.parse(localStorage.getItem("fpa-condition-colors-v1") || "{}"); } catch { return {}; }
+  });
+  const setConditionColor = useCallback((c: string, color: string | null) => {
+    setColorOverrides((old) => {
+      const next = { ...old };
+      if (color) next[c] = color;
+      else delete next[c];
+      try { localStorage.setItem("fpa-condition-colors-v1", JSON.stringify(next)); } catch { /* storage unavailable */ }
+      return next;
+    });
+  }, []);
 
   const conditions = useMemo(() => [...new Set(annotation.filter((a) => a.include).map((a) => a.condition))], [annotation]);
   const effectiveControl = conditions.includes(control) ? control : conditions[0] ?? "";
@@ -139,7 +154,7 @@ export function useAnalysis(): Analysis {
     setError(null);
   }, []);
 
-  const condColor = useCallback((c: string) => seriesColor(conditions.indexOf(c)), [conditions]);
+  const condColor = useCallback((c: string) => colorOverrides[c] ?? seriesColor(conditions.indexOf(c)), [conditions, colorOverrides]);
   const condShape = useCallback((c: string) => Math.max(0, conditions.indexOf(c)), [conditions]);
 
   return {
@@ -155,6 +170,8 @@ export function useAnalysis(): Analysis {
     conditions,
     condColor,
     condShape,
+    colorOverrides,
+    setConditionColor,
     selected,
     setSelected,
     loadText,

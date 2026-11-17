@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useAnalysis } from "./state";
 import { Icon, Logo } from "./components/ui";
+import { ChartOptionsProvider } from "./charts/options";
 import { DataView, ProcessingView, SamplesView } from "./views/setup";
 import { DEView, ExportView, HeatmapView, PCAView, ProteinPanel, QCView } from "./views/results";
 
@@ -67,6 +68,7 @@ export default function App() {
     ));
 
   return (
+    <ChartOptionsProvider conditions={a.conditions} condColor={a.condColor} condOverrides={a.colorOverrides} setCondColor={a.setConditionColor}>
     <div className="app">
       <nav className="sidebar" aria-label="Main">
         <div className="brand">
@@ -111,5 +113,6 @@ export default function App() {
       <ProteinPanel a={a} />
       {a.computing && <div className="busy">Updating…</div>}
     </div>
+    </ChartOptionsProvider>
   );
 }

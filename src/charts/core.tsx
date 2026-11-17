@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { OptionsPanel, useChartOptions, type OptionDefaults, type OptionField } from "./options";
 
 // ---------------------------------------------------------------- scales
 
@@ -209,7 +210,7 @@ export const TipRow = ({ k, v }: { k: string; v: ReactNode }) => (
 
 // ---------------------------------------------------------------- axes
 
-export function AxisBottom({ scale, y, ticks, title, format = tickFmt }: { scale: Scale; y: number; ticks: number[]; title?: string; format?: (v: number) => string }) {
+export function AxisBottom({ scale, y, ticks, title, format = tickFmt, k = 1 }: { scale: Scale; y: number; ticks: number[]; title?: string; format?: (v: number) => string; k?: number }) {
   const [r0, r1] = scale.range;
   return (
     <g>
@@ -217,34 +218,42 @@ export function AxisBottom({ scale, y, ticks, title, format = tickFmt }: { scale
       {ticks.map((t) => (
         <g key={t} transform={`translate(${scale(t)},${y})`}>
           <line className="axis-line" y2={4} />
-          <text y={16} textAnchor="middle">{format(t)}</text>
+          <text y={6 + 10 * k} textAnchor="middle">{format(t)}</text>
         </g>
       ))}
-      {title && <text className="axis-title" x={(r0 + r1) / 2} y={y + 34} textAnchor="middle">{title}</text>}
+      {title && <text className="axis-title" x={(r0 + r1) / 2} y={y + 12 + 22 * k} textAnchor="middle">{title}</text>}
     </g>
   );
 }
 
-export function AxisLeft({ scale, x, ticks, title, format = tickFmt, gridTo }: { scale: Scale; x: number; ticks: number[]; title?: string; format?: (v: number) => string; gridTo?: number }) {
+/** Height needed under a bottom axis (ticks + optional title). */
+export const bottomAxisSpace = (k: number, hasTitle: boolean) => Math.ceil(10 + 12 * k + (hasTitle ? 20 * k : 0));
+
+export function AxisLeft({ scale, x, ticks, title, format = tickFmt, gridTo, k = 1 }: { scale: Scale; x: number; ticks: number[]; title?: string; format?: (v: number) => string; gridTo?: number; k?: number }) {
   const [r0, r1] = scale.range;
+  const labels = ticks.map(format);
+  const labelW = Math.max(1, ...labels.map((l) => l.length)) * 6.3 * k;
   return (
     <g>
       {gridTo !== undefined && ticks.map((t) => <line key={`g${t}`} className="grid-line" x1={x} x2={gridTo} y1={scale(t)} y2={scale(t)} />)}
       <line className="axis-line" x1={x} x2={x} y1={r0} y2={r1} />
-      {ticks.map((t) => (
+      {ticks.map((t, i) => (
         <g key={t} transform={`translate(${x},${scale(t)})`}>
           <line className="axis-line" x2={-4} />
-          <text x={-7} dy="0.32em" textAnchor="end">{format(t)}</text>
+          <text x={-7} dy="0.32em" textAnchor="end">{labels[i]}</text>
         </g>
       ))}
       {title && (
-        <text className="axis-title" transform={`translate(${x - 40},${(r0 + r1) / 2}) rotate(-90)`} textAnchor="middle">
+        <text className="axis-title" transform={`translate(${x - labelW - 12 - 6 * k},${(r0 + r1) / 2}) rotate(-90)`} textAnchor="middle">
           {title}
         </text>
       )}
     </g>
   );
 }
+
+/** Ticks inside a domain, keeping only those that fall within it. */
+export const ticksIn = (d: [number, number], n: number) => niceTicks(d[0], d[1], n).filter((t) => t >= d[0] - 1e-9 && t <= d[1] + 1e-9);
 
 // ---------------------------------------------------------------- export
 
@@ -311,16 +320,20 @@ export function exportPng(svg: SVGSVGElement, name: string, scale = 3) {
   img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(text);
 }
 
-/** Card wrapper with a title and SVG/PNG export of the first <svg> inside. */
-export function ChartCard({ title, sub, actions, children, className, exportName }: {
+/** Card wrapper with a title, optional customisation panel and SVG/PNG export of the chart inside. */
+export function ChartCard({ title, sub, actions, children, className, exportName, customize }: {
   title: ReactNode;
   sub?: ReactNode;
   actions?: ReactNode;
   children: ReactNode;
   className?: string;
   exportName?: string;
+  customize?: { id: string; fields: OptionField[]; defaults?: OptionDefaults };
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  const opts = useChartOptions(customize?.id);
+  const edited = Object.keys(opts).length > 0;
   const get = useCallback(() => ref.current?.querySelector(".chart svg") as SVGSVGElement | null, []);
   return (
     <section className={`card ${className ?? ""}`}>
@@ -331,14 +344,26 @@ export function ChartCard({ title, sub, actions, children, className, exportName
         </div>
         <div className="row" style={{ gap: 6 }}>
           {actions}
-          {exportName && (
-            <div className="chart-actions">
-              <button className="btn ghost sm" title="Download SVG" onClick={() => { const s = get(); if (s) exportSvg(s, exportName); }}>SVG</button>
-              <button className="btn ghost sm" title="Download PNG (3×)" onClick={() => { const s = get(); if (s) exportPng(s, exportName); }}>PNG</button>
-            </div>
-          )}
+          <div className="chart-actions">
+            {customize && (
+              <button
+                className={`btn ghost sm ${open ? "pressed" : ""}`} aria-expanded={open} title="Edit chart parameters"
+                onClick={() => setOpen((v) => !v)}
+              >
+                <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12" /><circle cx="16" cy="6" r="2" /><circle cx="10" cy="12" r="2" /><circle cx="18" cy="18" r="2" /></svg>
+                Customize{edited ? " •" : ""}
+              </button>
+            )}
+            {exportName && (
+              <>
+                <button className="btn ghost sm" title="Download SVG" onClick={() => { const s = get(); if (s) exportSvg(s, exportName); }}>SVG</button>
+                <button className="btn ghost sm" title="Download PNG (3×)" onClick={() => { const s = get(); if (s) exportPng(s, exportName); }}>PNG</button>
+              </>
+            )}
+          </div>
         </div>
       </div>
+      {customize && open && <OptionsPanel id={customize.id} fields={customize.fields} defaults={customize.defaults} />}
       <div className="card-body" ref={ref}>{children}</div>
     </section>
   );
