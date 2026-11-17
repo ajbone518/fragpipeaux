@@ -16,6 +16,7 @@ Drop in `combined_protein.tsv` and get QC, PCA, differential expression, cluster
 | **Statistics** | Per-protein group-means linear model with **limma-style empirical-Bayes moderated t-tests**, or ordinary t-tests. Benjamini–Hochberg FDR. Comparisons can be versus control, all pairs, or custom. |
 | **QC** | Proteins per sample, intensity distributions before/after normalisation, protein coverage, clustered sample correlation, CV per condition, missing-value pattern, observed-vs-imputed densities. |
 | **Exploration** | Interactive PCA (any PC pair, top-N variable proteins, scree plot). Volcano plots with hover, gene search, smart non-overlapping labels and click-to-inspect. Clustered z-score heatmaps with dendrograms. A per-protein detail drawer (imputed values shown hollow). |
+| **Figure editing** | A **Customize** panel on each chart sets the title, axis labels, axis ranges, width × height, font size, point size and gridlines. It also covers volcano colours, the heatmap colour-scale limit and row labels, and condition colours (which apply to all charts). Settings are remembered per chart and carried into SVG/PNG exports. |
 | **Export** | SVG/PNG for every chart, results TSV (all comparisons side by side), normalised/imputed matrices, `parameters.json` for reproducibility, and an auto-generated **methods paragraph**. One click sends significant gene lists to Enrichr. |
 
 ### Compared with FragPipe-Analyst
