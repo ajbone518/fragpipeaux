@@ -30,6 +30,18 @@ jobs:
       - run: npm test
       - run: npm run build
 
+      # With "Deploy from a branch", GitHub publishes the raw repository (a blank
+      # page for a Vite app) and races this workflow on every push.
+      - name: Check Pages source is GitHub Actions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          type=$(gh api "repos/${{ github.repository }}/pages" --jq .build_type 2>/dev/null || echo "not enabled")
+          if [ "$type" != "workflow" ]; then
+            echo "::error title=GitHub Pages source::Settings → Pages → Source is '$type'. Set it to 'GitHub Actions', then re-run this workflow."
+            exit 1
+          fi
+
       - uses: actions/configure-pages@v5
 
       - uses: actions/upload-pages-artifact@v3
