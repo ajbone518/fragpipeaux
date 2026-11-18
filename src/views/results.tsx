@@ -17,7 +17,7 @@ const F: Record<string, OptionField[]> = {
   volcano: ["title", "xLabel", "yLabel", "xRange", "yRange", "size", "fontSize", "pointSize", "grid", "volcanoColors"],
   heatmap: ["title", "size", "fontSize", "colorLimit", "rowLabels", "conditionColors"],
 };
-import { correlation, cvByCondition, euclidean, hclust, pca } from "../lib/pipeline";
+import { correlation, cvByCondition, euclidean, factorialContrasts, hclust, pca } from "../lib/pipeline";
 import { finiteSorted, median } from "../lib/stats";
 import { DataTable, Icon, Seg, type Column } from "../components/ui";
 import { SOURCE_LABEL } from "../lib/parse";
@@ -295,11 +295,11 @@ export function DEView({ a }: { a: Analysis }) {
 
   const rows = useMemo<DERow[]>(() => {
     if (!res) return [];
-    const ga = proc.conditions.indexOf(res.a), gb = proc.conditions.indexOf(res.b);
+    const inContrast = new Set(res.groups);
     return proc.rows.map((r, i) => {
       const x = res.rows[i];
       let s = 0, n = 0;
-      proc.imputed.forEach((c, j) => { if ((proc.groupOf[j] === ga || proc.groupOf[j] === gb) && Number.isFinite(c[i])) { s += c[i]; n++; } });
+      proc.imputed.forEach((c, j) => { if (inContrast.has(proc.groupOf[j]) && Number.isFinite(c[i])) { s += c[i]; n++; } });
       return {
         i, gene: ds.genes[r], id: ds.ids[r], desc: ds.descriptions[r] ?? "",
         logFC: x?.logFC ?? NaN, p: x?.p ?? NaN, adjP: x?.adjP ?? NaN, t: x?.t ?? NaN,
@@ -330,7 +330,7 @@ export function DEView({ a }: { a: Analysis }) {
   const exportCsv = () => {
     const head = ["protein_id", "gene", "description", "log2FC", "t", "p_value", "adj_p_value", "significant", "average_log2_intensity"];
     const lines = rows.map((r) => [r.id, r.gene, `"${r.desc.replace(/"/g, '""')}"`, r.logFC, r.t, r.p, r.adjP, r.sig === 1 ? "up" : r.sig === -1 ? "down" : "", r.aveExpr].join("\t"));
-    download(`DE_${res.a}_vs_${res.b}.tsv`, [head.join("\t"), ...lines].join("\n"), "text/tab-separated-values");
+    download(`DE_${res.slug}.tsv`, [head.join("\t"), ...lines].join("\n"), "text/tab-separated-values");
   };
 
   const columns: Column<DERow>[] = [
@@ -361,9 +361,9 @@ export function DEView({ a }: { a: Analysis }) {
 
       <div className="split">
         <ChartCard
-          title={`${res.a} vs ${res.b}`}
+          title={res.name}
           sub={<>{res.nUp} up · {res.nDown} down · {a.params.test === "limma" && Number.isFinite(res.prior.df2) ? `prior df ${res.prior.df2.toFixed(1)}` : ""}</>}
-          exportName={`volcano_${res.a}_vs_${res.b}`}
+          exportName={`volcano_${res.slug}`}
           customize={{ id: "volcano", fields: F.volcano, defaults: { xLabel: "log₂ fold change", yLabel: "−log₁₀ p", height: 460, pointSize: volcanoDefaultPointSize(points.length) } }}
           actions={
             <label className="small muted row" style={{ gap: 6 }}>
@@ -381,7 +381,7 @@ export function DEView({ a }: { a: Analysis }) {
             onSelect={(i) => a.setSelected(proc.rows[i])}
             nLabels={nLabels} yTitle="−log₁₀ p"
           />
-          <Legend items={[{ label: `Up in ${res.a}`, color: vcol.up }, { label: `Up in ${res.b}`, color: vcol.down }, { label: "Not significant", color: vcol.ns }]} />
+          <Legend items={[{ label: res.upLabel, color: vcol.up }, { label: res.downLabel, color: vcol.down }, { label: "Not significant", color: vcol.ns }]} />
         </ChartCard>
 
         <section className="card">
@@ -405,8 +405,8 @@ export function DEView({ a }: { a: Analysis }) {
               <button className="btn sm" onClick={exportCsv}>{Icon.download(14)} Table (TSV)</button>
               <span className="spacer" />
               <span className="small muted">Enrichr:</span>
-              <button className="btn sm" disabled={!sigGenes(1).length} onClick={() => sendToEnrichr(sigGenes(1), `Up in ${res.a} vs ${res.b}`)}>Up ({sigGenes(1).length}) {Icon.external()}</button>
-              <button className="btn sm" disabled={!sigGenes(-1).length} onClick={() => sendToEnrichr(sigGenes(-1), `Down in ${res.a} vs ${res.b}`)}>Down ({sigGenes(-1).length}) {Icon.external()}</button>
+              <button className="btn sm" disabled={!sigGenes(1).length} onClick={() => sendToEnrichr(sigGenes(1), `${res.upLabel} — ${res.name}`)}>Up ({sigGenes(1).length}) {Icon.external()}</button>
+              <button className="btn sm" disabled={!sigGenes(-1).length} onClick={() => sendToEnrichr(sigGenes(-1), `${res.downLabel} — ${res.name}`)}>Down ({sigGenes(-1).length}) {Icon.external()}</button>
             </div>
             <div className="small muted" style={{ marginTop: 6 }}>Enrichr buttons send only the gene symbols to maayanlab.cloud, in a new tab.</div>
           </div>
@@ -608,10 +608,14 @@ export function methodsText(a: Analysis): string {
   const test = p.test === "limma"
     ? "Differential abundance was assessed with a per-protein linear model of condition means and empirical-Bayes moderated t-statistics (limma-style variance shrinkage)"
     : "Differential abundance was assessed with pooled-variance two-sample t-tests";
+  const factorial = factorialContrasts(proc.conditions, p.design ?? null);
   return [
     `Protein-level ${qt.label.toLowerCase()} values from ${SOURCE_LABEL[ds.source]} (${ds.ids.length.toLocaleString()} protein groups, ${proc.samples.length} samples, ${proc.conditions.length} conditions) were analysed with FragPipe Aux.`,
     `${p.removeContaminants ? "Contaminants were removed and p" : "P"}roteins ${filt} were retained (${proc.rows.length.toLocaleString()} proteins). ${qt.isLog2 ? "Values were already log2-transformed." : "Intensities were log2-transformed, with zeros treated as missing."} ${norm} ${imp}`,
     `${test} for the comparisons ${p.contrasts.map(([x, y]) => `${x} vs ${y}`).join(", ")}. P-values were ${p.useAdjusted ? "adjusted with the Benjamini–Hochberg procedure" : "not adjusted for multiple testing"}; proteins with ${p.useAdjusted ? "adjusted " : ""}p < ${p.alpha} and |log2 fold change| ≥ ${p.lfc} were considered significant.`,
+    ...(factorial.length
+      ? [`The conditions were treated as a 2×2 design (${p.design!.names[0]} × ${p.design!.names[1]}), and ${factorial.map((c) => c.name).join(", ")} ${factorial.length === 1 ? "was" : "were"} estimated as ${factorial.length === 1 ? "a contrast" : "contrasts"} of the same group-means model, so ${factorial.length === 1 ? "it shares" : "they share"} the variance moderation with the pairwise comparisons.`]
+      : []),
   ].join("\n\n");
 }
 

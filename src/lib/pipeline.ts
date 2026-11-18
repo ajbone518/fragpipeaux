@@ -23,6 +23,8 @@ export interface Params {
   seed: number;
   test: Test;
   contrasts: [string, string][];
+  /** Optional 2×2 factorial design adding interaction / main-effect contrasts. */
+  design: FactorDesign | null;
   alpha: number;
   lfc: number;
   useAdjusted: boolean;
@@ -41,6 +43,7 @@ export const defaultParams = (quantKey: string): Params => ({
   seed: 42,
   test: "limma",
   contrasts: [],
+  design: null,
   alpha: 0.05,
   lfc: 1,
   useAdjusted: true,
@@ -292,15 +295,178 @@ function knnImpute(m: Matrix, out: Matrix, mask: Uint8Array[], groupOf: number[]
 
 // ----------------------------------------------------- differential testing
 
+export type ContrastKind = "pairwise" | "main" | "interaction";
+
+/**
+ * A contrast as weights over conditions. Weights sum to zero; the estimate is
+ * Σ wᵍ·meanᵍ with unscaled standard error √(Σ wᵍ²/nᵍ), so a simple difference,
+ * a main effect and an interaction all go through the same moderated fit.
+ */
+export interface ContrastSpec {
+  name: string;
+  kind: ContrastKind;
+  /** one weight per condition, indexed as in `Processed.conditions` */
+  w: number[];
+  upLabel: string;
+  downLabel: string;
+  slug: string;
+}
+
 export interface ContrastResult {
   name: string;
-  a: string;
-  b: string;
+  kind: ContrastKind;
+  /** condition indices with a non-zero weight */
+  groups: number[];
+  /** how to describe a positive / negative estimate */
+  upLabel: string;
+  downLabel: string;
+  slug: string;
   rows: (TestRow | null)[];
   prior: Moderated;
   significant: Uint8Array;
   nUp: number;
   nDown: number;
+}
+
+/**
+ * A 2×2 factorial design laid over the conditions. Each condition is assigned a
+ * level on both factors; the four filled cells give the interaction and the two
+ * main effects.
+ */
+export interface FactorDesign {
+  /** display names of the two factors */
+  names: [string, string];
+  /** condition → [level on factor 1, level on factor 2]; "" means unassigned */
+  assign: Record<string, [string, string]>;
+  /** baseline level per factor; "" falls back to the first level seen */
+  ref: [string, string];
+  include: { interaction: boolean; main1: boolean; main2: boolean };
+}
+
+export const defaultDesign = (): FactorDesign => ({
+  names: ["Factor 1", "Factor 2"],
+  assign: {},
+  ref: ["", ""],
+  include: { interaction: true, main1: false, main2: false },
+});
+
+export interface ResolvedDesign {
+  /** [baseline, other] level names per factor */
+  levels: [[string, string], [string, string]];
+  /** cell[i][j] = condition index at factor-1 level i, factor-2 level j */
+  cell: [[number, number], [number, number]];
+}
+
+/** Checks a design against the live conditions, or explains why it is not usable. */
+export function resolveDesign(
+  conditions: string[],
+  d: FactorDesign | null,
+): { ok: true; design: ResolvedDesign } | { ok: false; reason: string } {
+  if (!d) return { ok: false, reason: "No factorial design defined." };
+  const assigned = conditions.filter((c) => d.assign[c]?.[0] && d.assign[c]?.[1]);
+  if (assigned.length < 4) return { ok: false, reason: `Assign both factor levels for 4 conditions (${assigned.length} done).` };
+  if (assigned.length > 4) return { ok: false, reason: `A 2×2 design needs exactly 4 assigned conditions (${assigned.length} assigned).` };
+
+  const levels: string[][] = [0, 1].map((k) => [...new Set(assigned.map((c) => d.assign[c][k]))]);
+  for (const k of [0, 1] as const) {
+    if (levels[k].length !== 2) return { ok: false, reason: `“${d.names[k]}” needs exactly 2 levels (found ${levels[k].length}).` };
+  }
+  const ordered = [0, 1].map((k) => {
+    const ls = levels[k];
+    const ref = ls.includes(d.ref[k]) ? d.ref[k] : ls[0];
+    return [ref, ls.find((l) => l !== ref)!] as [string, string];
+  }) as [[string, string], [string, string]];
+
+  const cell: number[][] = [[-1, -1], [-1, -1]];
+  for (const c of assigned) {
+    const i = ordered[0].indexOf(d.assign[c][0]);
+    const j = ordered[1].indexOf(d.assign[c][1]);
+    if (cell[i][j] >= 0) return { ok: false, reason: `${conditions[cell[i][j]]} and ${c} share a cell of the design.` };
+    cell[i][j] = conditions.indexOf(c);
+  }
+  for (const i of [0, 1]) for (const j of [0, 1]) {
+    if (cell[i][j] < 0) return { ok: false, reason: `No condition for ${ordered[0][i]} + ${ordered[1][j]}.` };
+  }
+  return { ok: true, design: { levels: ordered, cell: cell as ResolvedDesign["cell"] } };
+}
+
+/** The interaction and main-effect contrasts implied by a 2×2 design. */
+/** Contrast slugs end up in exported file names. */
+const slugify = (s: string) => s.replace(/[^\w.-]+/g, "_").replace(/^_+|_+$/g, "") || "contrast";
+
+export function factorialContrasts(conditions: string[], d: FactorDesign | null): ContrastSpec[] {
+  const r = resolveDesign(conditions, d);
+  if (!r.ok || !d) return [];
+  const { levels, cell } = r.design;
+  const [[a0, a1], [b0, b1]] = levels;
+  const [f1, f2] = d.names;
+  const vec = (parts: [number, number][]) => {
+    const w = new Array(conditions.length).fill(0);
+    for (const [g, x] of parts) w[g] += x;
+    return w;
+  };
+  const out: ContrastSpec[] = [];
+  if (d.include.interaction)
+    out.push({
+      kind: "interaction",
+      name: `Interaction: ${f1} × ${f2}`,
+      // (a1b1 − a1b0) − (a0b1 − a0b0)
+      w: vec([[cell[1][1], 1], [cell[1][0], -1], [cell[0][1], -1], [cell[0][0], 1]]),
+      upLabel: `${f2} effect higher in ${a1}`,
+      downLabel: `${f2} effect higher in ${a0}`,
+      slug: slugify(`interaction_${f1}_x_${f2}`),
+    });
+  if (d.include.main1)
+    out.push({
+      kind: "main",
+      name: `${f1}: ${a1} − ${a0}`,
+      w: vec([[cell[1][0], 0.5], [cell[1][1], 0.5], [cell[0][0], -0.5], [cell[0][1], -0.5]]),
+      upLabel: `Up in ${a1}`,
+      downLabel: `Up in ${a0}`,
+      slug: slugify(`main_${f1}_${a1}_vs_${a0}`),
+    });
+  if (d.include.main2)
+    out.push({
+      kind: "main",
+      name: `${f2}: ${b1} − ${b0}`,
+      w: vec([[cell[0][1], 0.5], [cell[1][1], 0.5], [cell[0][0], -0.5], [cell[1][0], -0.5]]),
+      upLabel: `Up in ${b1}`,
+      downLabel: `Up in ${b0}`,
+      slug: slugify(`main_${f2}_${b1}_vs_${b0}`),
+    });
+  return out;
+}
+
+/**
+ * Guesses a 2×2 split of exactly four conditions, by finding a token that is a
+ * suffix of two of them and whose removal leaves the other two. Only a starting
+ * point for the user to correct.
+ */
+export function guessDesign(conditions: string[]): FactorDesign | null {
+  if (conditions.length !== 4) return null;
+  const tails = new Set<string>();
+  for (const c of conditions) {
+    for (let i = 1; i < c.length - 1; i++) if (/[_\-. ]/.test(c[i])) tails.add(c.slice(i));
+  }
+  for (const tail of [...tails].sort((x, y) => x.length - y.length)) {
+    const token = tail.replace(/^[_\-. ]+/, "");
+    if (!token) continue;
+    const withTok = conditions.filter((x) => x.endsWith(tail) && x.length > tail.length);
+    if (withTok.length !== 2) continue;
+    const base = (x: string) => x.slice(0, x.length - tail.length);
+    const without = conditions.filter((x) => !withTok.includes(x));
+    if (without.length !== 2 || !withTok.every((x) => without.includes(base(x)))) continue;
+    const assign: Record<string, [string, string]> = {};
+    for (const x of without) assign[x] = [x, `no ${token}`];
+    for (const x of withTok) assign[x] = [base(x), token];
+    return {
+      names: ["Group", token],
+      assign,
+      ref: [without[0], `no ${token}`],
+      include: { interaction: true, main1: false, main2: false },
+    };
+  }
+  return null;
 }
 
 /** Per-protein group-means linear model (limma `~0 + condition` with NA handling). */
@@ -338,40 +504,63 @@ export function groupFits(m: Matrix, groupOf: number[], G: number) {
   return { means, counts, s2, df };
 }
 
+/** Every contrast to fit: the pairwise comparisons plus anything the design implies. */
+export function contrastSpecs(conditions: string[], p: Params): ContrastSpec[] {
+  const pairwise: ContrastSpec[] = p.contrasts
+    .filter(([a, b]) => conditions.includes(a) && conditions.includes(b) && a !== b)
+    .map(([a, b]) => {
+      const w = new Array(conditions.length).fill(0);
+      w[conditions.indexOf(a)] = 1;
+      w[conditions.indexOf(b)] = -1;
+      return { name: `${a} vs ${b}`, kind: "pairwise" as const, w, upLabel: `Up in ${a}`, downLabel: `Up in ${b}`, slug: slugify(`${a}_vs_${b}`) };
+    });
+  return [...pairwise, ...factorialContrasts(conditions, p.design ?? null)];
+}
+
 export function differential(proc: Processed, p: Params): ContrastResult[] {
   const G = proc.conditions.length;
   const fit = groupFits(proc.imputed, proc.groupOf, G);
-  return p.contrasts
-    .filter(([a, b]) => proc.conditions.includes(a) && proc.conditions.includes(b) && a !== b)
-    .map(([a, b]) => {
-      const ga = proc.conditions.indexOf(a);
-      const gb = proc.conditions.indexOf(b);
-      const fits: (ContrastFit | null)[] = proc.rows.map((_, r) => {
-        const na = fit.counts[ga][r];
-        const nb = fit.counts[gb][r];
-        if (!na || !nb || !(fit.df[r] > 0)) return null;
-        return {
-          logFC: fit.means[ga][r] - fit.means[gb][r],
-          stdUnscaled: Math.sqrt(1 / na + 1 / nb),
-          s2: fit.s2[r],
-          df: fit.df[r],
-        };
-      });
-      const { rows, prior } = moderate(fits, { s2: fit.s2, df: fit.df }, { moderated: p.test === "limma" });
-      const significant = new Uint8Array(rows.length);
-      let nUp = 0;
-      let nDown = 0;
-      rows.forEach((x, i) => {
-        if (!x) return;
-        const pv = p.useAdjusted ? x.adjP : x.p;
-        if (pv < p.alpha && Math.abs(x.logFC) >= p.lfc) {
-          significant[i] = 1;
-          if (x.logFC > 0) nUp++;
-          else nDown++;
-        }
-      });
-      return { name: `${a} vs ${b}`, a, b, rows, prior, significant, nUp, nDown };
+  return contrastSpecs(proc.conditions, p).map((spec) => {
+    const terms = spec.w.map((w, g) => [w, g] as const).filter(([w]) => w !== 0);
+    const fits: (ContrastFit | null)[] = proc.rows.map((_, r) => {
+      if (!(fit.df[r] > 0)) return null;
+      let logFC = 0;
+      let varUnscaled = 0;
+      for (const [w, g] of terms) {
+        const n = fit.counts[g][r];
+        if (!n) return null; // every group in the contrast must be observed
+        logFC += w * fit.means[g][r];
+        varUnscaled += (w * w) / n;
+      }
+      return { logFC, stdUnscaled: Math.sqrt(varUnscaled), s2: fit.s2[r], df: fit.df[r] };
     });
+    const { rows, prior } = moderate(fits, { s2: fit.s2, df: fit.df }, { moderated: p.test === "limma" });
+    const significant = new Uint8Array(rows.length);
+    let nUp = 0;
+    let nDown = 0;
+    rows.forEach((x, i) => {
+      if (!x) return;
+      const pv = p.useAdjusted ? x.adjP : x.p;
+      if (pv < p.alpha && Math.abs(x.logFC) >= p.lfc) {
+        significant[i] = 1;
+        if (x.logFC > 0) nUp++;
+        else nDown++;
+      }
+    });
+    return {
+      name: spec.name,
+      kind: spec.kind,
+      groups: terms.map(([, g]) => g),
+      upLabel: spec.upLabel,
+      downLabel: spec.downLabel,
+      slug: spec.slug,
+      rows,
+      prior,
+      significant,
+      nUp,
+      nDown,
+    };
+  });
 }
 
 export function defaultContrasts(conditions: string[], mode: "control" | "pairwise", control?: string): [string, string][] {

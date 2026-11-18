@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { applyAnnotationTable, buildDataset, inferAnnotation, parseTable } from "./parse";
-import { defaultContrasts, defaultParams, differential, hclust, impute, jacobiEigen, normalize, pca, process, rng } from "./pipeline";
+import { defaultContrasts, defaultParams, differential, factorialContrasts, guessDesign, hclust, impute, jacobiEigen, normalize, pca, process, resolveDesign, rng, type FactorDesign, type Processed } from "./pipeline";
 import { demoFiles } from "./demo";
 import { finiteSorted, median } from "./stats";
 
@@ -142,5 +142,101 @@ describe("pipeline", () => {
     const { order } = hclust(d);
     const pos = (i: number) => order.indexOf(i);
     expect(Math.abs(pos(2) - pos(3))).toBe(1);
+  });
+});
+
+describe("2x2 factorial contrasts", () => {
+  // Four conditions x 3 replicates. Protein 0 has a pure interaction: the
+  // "+aTC" effect is +1 in B and 0 in A. Protein 1 has a main effect of factor
+  // 1 only. Protein 2 is flat.
+  const conditions = ["A", "A_aTC", "B", "B_aTC"];
+  const cellMeans = [
+    [10, 10, 12, 13], // interaction = (13-12) - (10-10) = +1
+    [10, 10, 12, 12], // factor-1 main effect = +2, interaction = 0
+    [10, 10, 10, 10],
+  ];
+  // deterministic jitter so the residual variance is non-zero but tiny
+  const jitter = [0.02, -0.02, 0.0];
+  const groupOf = [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3];
+  const imputed = groupOf.map((g, j) =>
+    Float64Array.from(cellMeans.map((m) => m[g] + jitter[j % 3])),
+  );
+  const proc = {
+    samples: [], conditions, groupOf, rows: [0, 1, 2],
+    log2Raw: imputed, normalized: imputed, imputed,
+    imputedMask: [], steps: [],
+  } as unknown as Processed;
+
+  const design = (include: Partial<FactorDesign["include"]> = {}): FactorDesign => ({
+    names: ["strain", "aTC"],
+    assign: { A: ["A", "no"], A_aTC: ["A", "yes"], B: ["B", "no"], B_aTC: ["B", "yes"] },
+    ref: ["A", "no"],
+    include: { interaction: true, main1: false, main2: false, ...include },
+  });
+
+  it("estimates the interaction as (B:+aTC − B:−aTC) − (A:+aTC − A:−aTC)", () => {
+    const p = { ...defaultParams("x"), contrasts: [], design: design(), test: "ttest" as const };
+    const res = differential(proc, p);
+    expect(res).toHaveLength(1);
+    expect(res[0].kind).toBe("interaction");
+    expect(res[0].rows[0]!.logFC).toBeCloseTo(1, 12);
+    expect(res[0].rows[1]!.logFC).toBeCloseTo(0, 12);
+    expect(res[0].rows[2]!.logFC).toBeCloseTo(0, 12);
+    // all four groups feed the contrast
+    expect(res[0].groups.slice().sort()).toEqual([0, 1, 2, 3]);
+  });
+
+  it("uses the four-group standard error, not a two-group one", () => {
+    const p = { ...defaultParams("x"), contrasts: [["B", "A"]] as [string, string][], design: design(), test: "ttest" as const };
+    const [pair, inter] = differential(proc, p);
+    // stdUnscaled is sqrt(1/3+1/3) pairwise vs sqrt(4/3) for the interaction,
+    // so the interaction SE is exactly sqrt(2)x the pairwise SE at equal n.
+    expect(inter.rows[0]!.se / pair.rows[0]!.se).toBeCloseTo(Math.SQRT2, 10);
+  });
+
+  it("main effects average over the other factor", () => {
+    const p = { ...defaultParams("x"), contrasts: [], design: design({ main1: true, main2: true }), test: "ttest" as const };
+    const res = differential(proc, p);
+    const m1 = res.find((r) => r.kind === "main" && r.name.startsWith("strain"))!;
+    const m2 = res.find((r) => r.kind === "main" && r.name.startsWith("aTC"))!;
+    // protein 0: strain effect = mean(12,13) - mean(10,10) = 2.5
+    expect(m1.rows[0]!.logFC).toBeCloseTo(2.5, 12);
+    // protein 0: aTC effect = mean(10,13) - mean(10,12) = 0.5
+    expect(m2.rows[0]!.logFC).toBeCloseTo(0.5, 12);
+    // protein 1: pure factor-1 effect of 2, no aTC effect
+    expect(m1.rows[1]!.logFC).toBeCloseTo(2, 12);
+    expect(m2.rows[1]!.logFC).toBeCloseTo(0, 12);
+  });
+
+  it("swapping the baseline flips the sign", () => {
+    const d = design();
+    const flipped = { ...d, ref: ["B", "no"] as [string, string] };
+    const p = { ...defaultParams("x"), contrasts: [], test: "ttest" as const };
+    expect(differential(proc, { ...p, design: d })[0].rows[0]!.logFC).toBeCloseTo(1, 12);
+    expect(differential(proc, { ...p, design: flipped })[0].rows[0]!.logFC).toBeCloseTo(-1, 12);
+  });
+
+  it("rejects designs that are not a complete 2x2", () => {
+    const bad = (patch: Partial<FactorDesign>) => resolveDesign(conditions, { ...design(), ...patch });
+    expect(resolveDesign(conditions, design()).ok).toBe(true);
+    // a condition left unassigned
+    expect(bad({ assign: { A: ["A", "no"], A_aTC: ["A", "yes"], B: ["B", "no"], B_aTC: ["", ""] } }).ok).toBe(false);
+    // three levels on a factor
+    expect(bad({ assign: { A: ["A", "no"], A_aTC: ["A", "yes"], B: ["B", "no"], B_aTC: ["C", "yes"] } }).ok).toBe(false);
+    // two conditions in the same cell
+    expect(bad({ assign: { A: ["A", "no"], A_aTC: ["A", "no"], B: ["B", "no"], B_aTC: ["B", "yes"] } }).ok).toBe(false);
+    expect(factorialContrasts(conditions, { ...design(), ref: ["A", "no"], assign: {} })).toEqual([]);
+  });
+
+  it("guesses a design from a shared suffix", () => {
+    const g = guessDesign(["Nt", "Nt_aTC", "TopAkd", "TopAkd_aTC"]);
+    expect(g).not.toBeNull();
+    expect(g!.names[1]).toBe("aTC");
+    expect(g!.assign["TopAkd_aTC"]).toEqual(["TopAkd", "aTC"]);
+    expect(g!.assign["Nt"]).toEqual(["Nt", "no aTC"]);
+    expect(resolveDesign(["Nt", "Nt_aTC", "TopAkd", "TopAkd_aTC"], g).ok).toBe(true);
+    // nothing to find
+    expect(guessDesign(["A", "B", "C", "D"])).toBeNull();
+    expect(guessDesign(["A", "B", "C"])).toBeNull();
   });
 });

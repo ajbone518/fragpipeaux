@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import type { Analysis } from "../state";
 import { SOURCE_LABEL } from "../lib/parse";
+import { defaultDesign, factorialContrasts, guessDesign, resolveDesign, type FactorDesign } from "../lib/pipeline";
 import { download } from "../charts/core";
 import { Field, Icon, NumberInput, Seg, readFile } from "../components/ui";
 
@@ -339,6 +340,8 @@ export function ProcessingView({ a, next }: { a: Analysis; next: () => void }) {
           </div>
         </section>
 
+        <FactorialSection a={a} />
+
         <section className="card span-all">
           <div className="card-head"><h3>Protein filtering</h3><div className="sub">Proteins remaining after each step</div></div>
           <div className="card-body funnel">
@@ -353,5 +356,135 @@ export function ProcessingView({ a, next }: { a: Analysis; next: () => void }) {
         </section>
       </div>
     </>
+  );
+}
+
+// ------------------------------------------------- 2x2 factorial design
+
+function FactorialSection({ a }: { a: Analysis }) {
+  const d = a.params.design;
+  const set = (patch: Partial<FactorDesign>) => a.setParams({ design: { ...(d ?? defaultDesign()), ...patch } });
+  const assignLevel = (cond: string, k: 0 | 1, value: string) => {
+    const base = d ?? defaultDesign();
+    const cur = base.assign[cond] ?? ["", ""];
+    const next: [string, string] = k === 0 ? [value, cur[1]] : [cur[0], value];
+    set({ assign: { ...base.assign, [cond]: next } });
+  };
+  const levelsOf = (k: 0 | 1) => [...new Set(a.conditions.map((c) => d?.assign[c]?.[k] ?? "").filter(Boolean))];
+  const status = resolveDesign(a.conditions, d);
+  const derived = factorialContrasts(a.conditions, d);
+
+  return (
+    <section className="card span-all">
+      <div className="card-head">
+        <h3>Factorial design</h3>
+        <div className="sub">Adds an interaction test for a 2×2 experiment</div>
+      </div>
+      <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <Seg
+          value={d ? "on" : "off"}
+          onChange={(v) => a.setParams({ design: v === "on" ? (guessDesign(a.conditions) ?? defaultDesign()) : null })}
+          options={[{ value: "off", label: "Off" }, { value: "on", label: "2×2 design" }]}
+        />
+        {!d && (
+          <div className="muted small">
+            With two crossed factors — say strain and inducer — the interaction asks whether the inducer does something
+            different in one strain than the other. Pairwise comparisons cannot answer that.
+          </div>
+        )}
+        {d && (
+          <>
+            <div className="row">
+              {([0, 1] as const).map((k) => (
+                <Field key={k} label={`Factor ${k + 1} name`}>
+                  <input
+                    className="input sm"
+                    value={d.names[k]}
+                    onChange={(e) => set({ names: (k === 0 ? [e.target.value, d.names[1]] : [d.names[0], e.target.value]) as [string, string] })}
+                  />
+                </Field>
+              ))}
+            </div>
+            <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Condition</th>
+                  <th>{d.names[0] || "Factor 1"}</th>
+                  <th>{d.names[1] || "Factor 2"}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {a.conditions.map((c) => (
+                  <tr key={c}>
+                    <td>
+                      <span className="swatch" style={{ background: a.condColor(c) }} /> {c}
+                    </td>
+                    {([0, 1] as const).map((k) => (
+                      <td key={k}>
+                        <input
+                          className="input sm"
+                          list={`levels-${k}`}
+                          placeholder="unassigned"
+                          value={d.assign[c]?.[k] ?? ""}
+                          onChange={(e) => assignLevel(c, k, e.target.value)}
+                        />
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            </div>
+            {([0, 1] as const).map((k) => (
+              <datalist key={k} id={`levels-${k}`}>
+                {levelsOf(k).map((l) => <option key={l} value={l} />)}
+              </datalist>
+            ))}
+            <div className="row">
+              {([0, 1] as const).map((k) => (
+                <Field key={k} label={`${d.names[k] || `Factor ${k + 1}`} baseline`} hint="Effects are measured relative to this level">
+                  <select
+                    className="select"
+                    value={d.ref[k]}
+                    onChange={(e) => set({ ref: (k === 0 ? [e.target.value, d.ref[1]] : [d.ref[0], e.target.value]) as [string, string] })}
+                  >
+                    <option value="">First seen</option>
+                    {levelsOf(k).map((l) => <option key={l}>{l}</option>)}
+                  </select>
+                </Field>
+              ))}
+            </div>
+            <div className="row">
+              {([
+                ["interaction", "Interaction"],
+                ["main1", `Main effect of ${d.names[0] || "factor 1"}`],
+                ["main2", `Main effect of ${d.names[1] || "factor 2"}`],
+              ] as const).map(([key, label]) => (
+                <label key={key} className="check">
+                  <input
+                    type="checkbox"
+                    checked={d.include[key]}
+                    onChange={(e) => set({ include: { ...d.include, [key]: e.target.checked } })}
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+            {status.ok ? (
+              derived.length ? (
+                <div className="row">
+                  {derived.map((c) => <span key={c.slug} className="chip on">{c.name}</span>)}
+                </div>
+              ) : (
+                <div className="muted small">Design is complete — tick a contrast above to add it.</div>
+              )
+            ) : (
+              <div className="notice">{status.reason}</div>
+            )}
+          </>
+        )}
+      </div>
+    </section>
   );
 }
